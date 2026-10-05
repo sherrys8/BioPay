@@ -67,6 +67,10 @@ internal object ContinuePrompt {
         // shows the payment-method picker, so a container-sized cover paints across an unrelated
         // page. No key on screen means nothing here is a keypad, and nothing gets covered.
         val visibleKeys = keys.filter(::isPainted)
+        ModuleLog.d {
+            "keypad geometry: view=${keyboard.hashCode()} size=${keyboard.width}x${keyboard.height} " +
+                "shown=${keyboard.isShown} keys=${keys.size} painted=${visibleKeys.size} regions=${regions.size}"
+        }
         if (visibleKeys.isEmpty()) return regions
         val index = regions.indexOfFirst { it.first === window }
         if (index < 0) {
