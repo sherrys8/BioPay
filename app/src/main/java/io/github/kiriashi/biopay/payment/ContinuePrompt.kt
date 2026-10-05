@@ -11,12 +11,14 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.Drawable
+import android.os.SystemClock
 import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import io.github.kiriashi.biopay.apps.shared.PaymentMasks
+import io.github.kiriashi.biopay.apps.shared.PaymentViewTree
 import io.github.kiriashi.biopay.core.log.ModuleLog
 import io.github.kiriashi.biopay.runtime.AppRuntime
 import io.github.kiriashi.biopay.settings.ui.Theme
@@ -58,25 +60,35 @@ internal object ContinuePrompt {
 
     private fun regions(state: AppRuntime, keyboard: ViewGroup): List<Pair<ViewGroup, List<View>>> {
         val session = state.session
-        val keys = state.adapter.digitKeys(keyboard)?.filterNotNull().orEmpty()
-        val regions = PaymentMasks.resolve(
-            state.adapter.app, keyboard, session.getInputEditText(), session.getConfirmButton(), keys
-        ).map { it.host to it.targets }.toMutableList()
-        val window = keyboard.rootView as? ViewGroup ?: return regions
-        // Cover the keys, never the keyboard container: WeChat leaves that window visible while it
-        // shows the payment-method picker, so a container-sized cover paints across an unrelated
-        // page. No key on screen means nothing here is a keypad, and nothing gets covered.
-        val visibleKeys = keys.filter(::isPainted)
-        ModuleLog.d {
-            "keypad geometry: view=${keyboard.hashCode()} size=${keyboard.width}x${keyboard.height} " +
-                "shown=${keyboard.isShown} keys=${keys.size} painted=${visibleKeys.size} regions=${regions.size}"
+        val window = keyboard.rootView as? ViewGroup ?: return emptyList()
+        if (isPaymentMethodPicker(window)) return emptyList()
+        // Search the whole window too: WeChat keeps several MyKeyboardWindow instances and the one
+        // that announced itself is often the unmeasured one.
+        val keys = (state.adapter.digitKeys(keyboard).orEmpty() + state.adapter.digitKeys(window).orEmpty())
+            .filterNotNull().distinct()
+        var painted = keys.filter(::isPainted)
+        if (painted.isEmpty()) {
+            // findViewById stops at the first match per id, which can be a hidden duplicate. Any
+            // on-screen view carrying one of those same resource names is a real key.
+            val names = keys.mapNotNull(::resourceNameOf).toHashSet()
+            painted = if (names.isEmpty()) emptyList() else PaymentViewTree(window).all.filter {
+                resourceNameOf(it) in names && isPainted(it)
+            }
         }
-        if (visibleKeys.isEmpty()) return regions
+        if (painted.isEmpty()) return emptyList()
+        val keypad: ViewGroup = ((painted.first().parent as? View)?.parent as? ViewGroup) ?: keyboard
+        val regions = PaymentMasks.resolve(
+            state.adapter.app, keyboard, session.getInputEditText(), session.getConfirmButton(), painted
+        ).map { it.host to it.targets }.toMutableList()
         val index = regions.indexOfFirst { it.first === window }
         if (index < 0) {
-            regions += window to visibleKeys
+            regions += window to listOf<View>(keypad)
         } else {
-            regions[index] = window to (regions[index].second + visibleKeys)
+            regions[index] = window to (regions[index].second + keypad)
+        }
+        ModuleLog.d {
+            "keypad geometry: view=${keyboard.hashCode()} keys=${keys.size} painted=${painted.size} " +
+                "keypad=${keypad.hashCode()}x${keypad.width}x${keypad.height} regions=${regions.size}"
         }
         return regions
     }
@@ -116,6 +128,7 @@ internal object ContinuePrompt {
         private val panelMargin = 24f * density
         private var closed = false
         private var gesture = false
+        private var pickerCheckedAt = 0L
 
         private fun fillPaint(color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
@@ -192,6 +205,14 @@ internal object ContinuePrompt {
                 close()
                 return true
             }
+            val now = SystemClock.uptimeMillis()
+            if (now - pickerCheckedAt >= PICKER_CHECK_MS) {
+                pickerCheckedAt = now
+                if (isPaymentMethodPicker(host)) {
+                    close()
+                    return true
+                }
+            }
             updateBounds()
             if (drawnPanel != panel || drawnContinue != continueButton || drawnManual != manualButton) {
                 drawnPanel.set(panel)
@@ -217,6 +238,14 @@ internal object ContinuePrompt {
             }
             continueButton.setEmpty()
             manualButton.setEmpty()
+            if (hasEntries && !panel.isEmpty) {
+                // FingerprintPay anchors its cover to the bottom of the window at full width instead
+                // of trusting measured key bounds, so a keypad that has not finished laying out still
+                // cannot be tapped. Same rule here, before the exits are positioned.
+                panel.left = 0f
+                panel.right = host.width.toFloat()
+                panel.bottom = host.height.toFloat()
+            }
             if (!hasEntries) return
             // Too short for the exits means a bar that swallows touches and offers nothing, so it
             // uncovers instead. Hosts with hasEntries=false are secondary windows and still cover.
@@ -272,6 +301,27 @@ internal object ContinuePrompt {
             const val MANUAL_LABEL = "输入密码"
         }
     }
+}
+
+private const val PICKER_CHECK_MS = 250L
+
+private val PICKER_LABELS = arrayOf(
+    "选择付款方式", "選擇付款方式", "Select payment method", "请选择优惠", "請選擇優惠", "Select discount"
+)
+
+/**
+ * WeChat swaps the payment-method picker into the same window that carries the keypad, so an overlay
+ * cover would otherwise sit on top of that list. FingerprintPay recognises the page by its title and
+ * drops the cover; the same strings are used here.
+ */
+private fun isPaymentMethodPicker(window: ViewGroup): Boolean =
+    PaymentViewTree(window).hasText(*PICKER_LABELS)
+
+/** The id name is the only thing shared between WeChat's duplicate keypad instances. */
+private fun resourceNameOf(view: View): String? = try {
+    view.resources.getResourceEntryName(view.id)
+} catch (_: Throwable) {
+    null
 }
 
 /**
