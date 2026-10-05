@@ -1,0 +1,81 @@
+name: Build
+
+# Compile, lint and run unit tests for every change on main and on pull requests.
+# This never publishes anything; see release.yml for that.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Detect signing secrets
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BIOPAY_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Signing keystore is not configured; the debug APK will use the default debug key.'
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore release keystore
+        if: steps.signing.outputs.available == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BIOPAY_RELEASE_KEYSTORE_BASE64 }}
+        run: printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/biopay-release.keystore"
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+
+      - name: Build and test
+        env:
+          BIOPAY_RELEASE_STORE_FILE: ${{ runner.temp }}/biopay-release.keystore
+          BIOPAY_RELEASE_STORE_PASSWORD: ${{ secrets.BIOPAY_RELEASE_STORE_PASSWORD }}
+          BIOPAY_RELEASE_KEY_ALIAS: ${{ secrets.BIOPAY_RELEASE_KEY_ALIAS }}
+          BIOPAY_RELEASE_KEY_PASSWORD: ${{ secrets.BIOPAY_RELEASE_KEY_PASSWORD }}
+        run: ./gradlew lintDebug testDebugUnitTest assembleDebug --warning-mode fail
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: debug
+          if-no-files-found: error
+          retention-days: 14
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload failure reports
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: reports
+          retention-days: 14
+          path: |
+            app/build/reports/**
+            app/build/test-results/**
