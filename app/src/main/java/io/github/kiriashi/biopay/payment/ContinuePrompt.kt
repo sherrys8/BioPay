@@ -78,8 +78,8 @@ internal object ContinuePrompt {
         private val keyboardRect = Rect()
         private val location = IntArray(2)
         private val observer = host.viewTreeObserver
-        private val primaryRadius = host.dp(BUTTON_HEIGHT_DP / 2).toFloat()
-        private val secondaryRadius = host.dp(ENTRY_HEIGHT_DP / 2).toFloat()
+        private val primaryRadius = host.context.dp(BUTTON_HEIGHT_DP / 2).toFloat()
+        private val secondaryRadius = host.context.dp(ENTRY_HEIGHT_DP / 2).toFloat()
         private var closed = false
         private var pressed = Region.NONE
 
@@ -168,8 +168,8 @@ internal object ContinuePrompt {
             primary.setEmpty()
             secondary.setEmpty()
             host.getLocationOnScreen(location)
-            val margin = host.dp(MARGIN_DP).toFloat()
-            val height = host.dp(BUTTON_HEIGHT_DP).toFloat()
+            val margin = host.context.dp(MARGIN_DP).toFloat()
+            val height = host.context.dp(BUTTON_HEIGHT_DP).toFloat()
             val width = host.width - margin * 2f
             if (width <= 0f || host.height <= 0) return
             val keypadTop = if (keyboard.getGlobalVisibleRect(keyboardRect)) {
@@ -177,7 +177,7 @@ internal object ContinuePrompt {
             } else {
                 host.height
             }
-            val aboveKeypad = keypadTop - host.dp(GAP_DP) - height
+            val aboveKeypad = keypadTop - host.context.dp(GAP_DP) - height
             val top = if (aboveKeypad >= margin) {
                 aboveKeypad
             } else {
@@ -186,11 +186,11 @@ internal object ContinuePrompt {
             }
             primary.set(margin, top, margin + width, top + height)
             if (!abandoned) return
-            val entryHeight = host.dp(ENTRY_HEIGHT_DP).toFloat()
-            val entryTop = host.dp(ENTRY_TOP_DP).toFloat()
+            val entryHeight = host.context.dp(ENTRY_HEIGHT_DP).toFloat()
+            val entryTop = host.context.dp(ENTRY_TOP_DP).toFloat()
             val right = host.width - margin
             val left = (right - secondaryLabel.measureText(MANUAL_LABEL) -
-                host.dp(ENTRY_PADDING_X_DP) * 2f).coerceAtLeast(margin)
+                host.context.dp(ENTRY_PADDING_X_DP) * 2f).coerceAtLeast(margin)
             secondary.set(left, entryTop, right, entryTop + entryHeight)
         }
 
