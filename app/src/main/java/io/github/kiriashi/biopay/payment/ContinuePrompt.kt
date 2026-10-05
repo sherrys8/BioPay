@@ -6,6 +6,7 @@
 package io.github.kiriashi.biopay.payment
 
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -105,7 +106,8 @@ internal object ContinuePrompt {
 
         private val colors = Theme.colors(host.context, state.adapter.app)
         private val density = host.context.resources.displayMetrics.density
-        private val surface = fillPaint(colors.surface)
+        // Deliberately not Theme.surface: the cover must read as an opaque sheet over the keypad.
+        private val surface = fillPaint(Color.WHITE)
         private val continuePaint = fillPaint(colors.primary)
         private val manualPaint = fillPaint(colors.surfaceContainerHighest)
         private val continueText = textPaint(16f, colors.onPrimary)
