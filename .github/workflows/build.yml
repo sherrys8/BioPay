@@ -1,6 +1,6 @@
 name: Build
 
-# Compile, lint and run unit tests for every change on main and on pull requests.
+# Compile, lint and test the debug variant, and build a signed release APK.
 # This never publishes anything; see release.yml for that.
 on:
   workflow_dispatch:
@@ -16,30 +16,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  debug:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v5
-
-      - name: Detect signing secrets
-        id: signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.BIOPAY_RELEASE_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo 'available=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'Signing keystore is not configured; the debug APK will use the default debug key.'
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Restore release keystore
-        if: steps.signing.outputs.available == 'true'
-        env:
-          KEYSTORE_BASE64: ${{ secrets.BIOPAY_RELEASE_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
-        run: printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/biopay-release.keystore"
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v5
@@ -55,11 +37,6 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build and test
-        env:
-          BIOPAY_RELEASE_STORE_FILE: ${{ runner.temp }}/biopay-release.keystore
-          BIOPAY_RELEASE_STORE_PASSWORD: ${{ secrets.BIOPAY_RELEASE_STORE_PASSWORD || secrets.KEYSTORE_PASSWORD }}
-          BIOPAY_RELEASE_KEY_ALIAS: ${{ secrets.BIOPAY_RELEASE_KEY_ALIAS || secrets.KEY_ALIAS }}
-          BIOPAY_RELEASE_KEY_PASSWORD: ${{ secrets.BIOPAY_RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         run: ./gradlew lintDebug testDebugUnitTest assembleDebug --warning-mode fail
 
       - name: Upload debug APK
@@ -74,8 +51,89 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: reports
+          name: debug-reports
           retention-days: 14
           path: |
             app/build/reports/**
             app/build/test-results/**
+
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      APK: app/build/outputs/apk/release/app-release.apk
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Detect signing keystore
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'KEYSTORE_BASE64 is not set; the release APK will be produced unsigned.'
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore keystore
+        if: steps.signing.outputs.available == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/biopay-release.keystore"
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+
+      # app/build.gradle.kts reads these environment variable names; their values come from the
+      # KEYSTORE_* secrets, so no BIOPAY_* repository secret is required here.
+      - name: Build release
+        env:
+          BIOPAY_RELEASE_STORE_FILE: ${{ runner.temp }}/biopay-release.keystore
+          BIOPAY_RELEASE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          BIOPAY_RELEASE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          BIOPAY_RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew lintRelease assembleRelease --warning-mode fail
+
+      - name: Verify signature
+        if: steps.signing.outputs.available == 'true'
+        run: |
+          test -s "$APK"
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          "$APKSIGNER" verify --print-certs "$APK"
+
+      - name: Verify the module entry survived shrinking
+        run: |
+          ENTRY=$(python3 -c "import zipfile,sys;print(zipfile.ZipFile(sys.argv[1]).read('META-INF/xposed/java_init.list').decode().strip())" "$APK")
+          echo "Module entry: $ENTRY"
+          if ! unzip -p "$APK" 'classes*.dex' | grep -a "L${ENTRY//.//};" > /dev/null; then
+            echo "::error::R8 renamed or removed $ENTRY; LSPosed would not load the module."
+            exit 1
+          fi
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: release
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ env.APK }}
+
+      - name: Upload mapping
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-mapping
+          retention-days: 90
+          path: app/build/outputs/mapping/release/mapping.txt
