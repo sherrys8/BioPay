@@ -59,12 +59,31 @@ internal object ContinuePrompt {
     private fun regions(state: AppRuntime, keyboard: ViewGroup): List<Pair<ViewGroup, List<View>>> {
         val session = state.session
         val keys = state.adapter.digitKeys(keyboard)?.filterNotNull()
-        val layouts = PaymentMasks.resolve(
+        val regions = PaymentMasks.resolve(
             state.adapter.app, keyboard, session.getInputEditText(), session.getConfirmButton(), keys
-        )
-        if (layouts.isNotEmpty()) return layouts.map { it.host to it.targets }
-        val host = keyboard.rootView as? ViewGroup ?: return emptyList()
-        return listOf(host to listOf<View>(keyboard))
+        ).map { it.host to it.targets }.toMutableList()
+        val window = keyboard.rootView as? ViewGroup ?: return regions
+        val index = regions.indexOfFirst { it.first === window }
+        if (index < 0) {
+            regions += window to listOf<View>(keyboard)
+        } else if (!keypadCovered(regions[index].second, keyboard)) {
+            // PaymentMasks resolves the area that shows the plaintext, which is not the area that
+            // can be tapped: a keypad that fails to resolve, or that resolves to the window itself
+            // and is then dropped, leaves the keys live under a cover over the hint row only.
+            regions[index] = window to (regions[index].second + keyboard)
+        }
+        return regions
+    }
+
+    private fun keypadCovered(targets: List<View>, keyboard: ViewGroup): Boolean {
+        val keypad = Rect()
+        if (!keyboard.getGlobalVisibleRect(keypad)) return false
+        val covered = Rect()
+        for (view in targets) {
+            val bounds = Rect()
+            if (view.getGlobalVisibleRect(bounds)) covered.union(bounds)
+        }
+        return covered.contains(keypad)
     }
 
     private class Cover(
@@ -201,9 +220,18 @@ internal object ContinuePrompt {
             }
             continueButton.setEmpty()
             manualButton.setEmpty()
-            if (!hasEntries || panel.height() < continueHeight + manualHeight + continueGap + panelMargin) return
+            if (!hasEntries) return
+            // Too short for the exits means a bar that swallows touches and offers nothing, so it
+            // uncovers instead. Hosts with hasEntries=false are secondary windows and still cover.
+            if (panel.height() < continueHeight + manualHeight + continueGap + panelMargin) {
+                panel.setEmpty()
+                return
+            }
             val width = (panel.width() - panelMargin * 2f).coerceAtMost(320f * density)
-            if (width <= 0f) return
+            if (width <= 0f) {
+                panel.setEmpty()
+                return
+            }
             val left = panel.centerX() - width / 2f
             val top = panel.centerY() -
                 (continueHeight + continueGap + manualHeight) / 2f
