@@ -172,6 +172,11 @@ object PasswordCipher {
         }
     }
 
+    /** Loads the Keystore key so the tap that opens the sheet does not pay the binder round trip. */
+    fun warmUp() {
+        getSecretKey()
+    }
+
     fun createDecryptOperation(encoded: String, packageName: String): DecryptOperation? {
         return try {
             val bound = isAppBoundCiphertext(encoded)

@@ -15,6 +15,7 @@ import io.github.kiriashi.biopay.core.log.ModuleLog
 import io.github.kiriashi.biopay.core.util.MainTasks
 import io.github.kiriashi.biopay.core.util.findActivity
 import io.github.kiriashi.biopay.runtime.AppRuntime
+import io.github.kiriashi.biopay.storage.PasswordCipher
 import java.lang.ref.WeakReference
 
 class PaymentFlow(private val state: AppRuntime) {
@@ -23,11 +24,13 @@ class PaymentFlow(private val state: AppRuntime) {
     private var attachedViewRef: WeakReference<ViewGroup>? = null
     private val setupLock = Any()
     private val tasks = MainTasks()
+    @Volatile private var pendingMarkUsed: (() -> Unit)? = null
 
     fun setupBiometricAuth(
         keyboardView: ViewGroup, encodedPassword: String,
         hostActivity: Activity? = null, startImmediately: Boolean = true,
-        keyboardMode: KeyboardMode = KeyboardMode.APP
+        keyboardMode: KeyboardMode = KeyboardMode.APP,
+        onContinue: (() -> Unit)? = null
     ): Boolean {
         if (state.isClosed) return false
         val config = state.prefs.activeConfig()?.takeIf { it.encryptedPassword == encodedPassword } ?: return false
@@ -59,20 +62,93 @@ class PaymentFlow(private val state: AppRuntime) {
             synchronized(attachLock) { attachedViewRef = WeakReference(keyboardView) }
         }
         if (!shouldTrigger) return true
-        return BiometricAuth.triggerBiometricAuth(keyboardView, encodedPassword, state, sessionId)
+        return awaitContinue(keyboardView, sessionId, onContinue)
+    }
+
+    /** Draws the confirmation affordance instead of opening the authentication sheet directly. */
+    private fun awaitContinue(
+        keyboardView: ViewGroup, sessionId: Long, onContinue: (() -> Unit)?
+    ): Boolean {
+        pendingMarkUsed = onContinue
+        if (!state.session.continueState.request()) return true
+        // The Keystore key load is the only cost between the tap and the sheet; pay it up front.
+        state.paymentWorker.submit(work = {
+            if (state.isClosed) null else runCatching { PasswordCipher.warmUp() }.getOrNull()
+        }, discard = { }) { }
+        return drawAffordance(keyboardView, sessionId)
+    }
+
+    /**
+     * Redraws the affordance when a layout pass finds the keypad alive but nothing on screen,
+     * which happens after a payment Activity hides and shows its password sheet again.
+     */
+    fun refreshContinuePrompt(keyboardView: ViewGroup) {
+        val sessionId = state.session.currentSessionId()
+        if (state.isClosed || sessionId == 0L || state.session.continueState.manual) return
+        if (!state.session.isCurrentSession(sessionId)) return
+        if (state.session.isAuthenticationInProgress() || PasswordAutoInput.isInProgress(sessionId)) return
+        drawAffordance(keyboardView, sessionId)
+    }
+
+    private fun drawAffordance(keyboardView: ViewGroup, sessionId: Long): Boolean = ContinuePrompt.show(
+        state, keyboardView, sessionId,
+        abandoned = state.session.continueState.abandoned,
+        onContinue = ::openAuthentication,
+        onManualEntry = { enterManualMode(sessionId) }
+    )
+
+    /** Opens the sheet against the keypad and password the session currently holds. */
+    private fun openAuthentication() {
+        if (state.isClosed) return
+        val keyboardView = state.session.getCurrentKeyboardView() ?: return
+        val encodedPassword = state.session.getCurrentEncodedPassword()
+            ?: state.prefs.activePassword() ?: return
+        val sessionId = state.session.currentSessionId()
+        if (state.session.isAuthenticationInProgress() ||
+            PasswordAutoInput.isInProgress(sessionId)
+        ) return
+        // Consumed here so a bail below can leave the screen asking again.
+        val markUsed = pendingMarkUsed
+        pendingMarkUsed = null
+        if (BiometricAuth.triggerBiometricAuth(keyboardView, encodedPassword, state, sessionId)) {
+            markUsed?.invoke()
+        } else {
+            // The sheet never launched; put the exits back rather than leaving a dead tap.
+            drawAffordance(keyboardView, sessionId)
+        }
+    }
+
+    /** The user took over typing; the keypad and its input method go back to them. */
+    private fun enterManualMode(sessionId: Long) {
+        if (state.isClosed) return
+        if (state.session.isCurrentSession(sessionId)) {
+            state.session.continueState.enterManual()
+            ContinuePrompt.dismiss()
+        }
+        state.session.restoreKeyboard(sessionId)
+    }
+
+    /**
+     * The sheet closed without entering the password. Restore the exits so a key gesture is
+     * never the only way back.
+     */
+    fun authenticationAbandoned(sessionId: Long) {
+        if (state.isClosed || !state.session.isCurrentSession(sessionId)) return
+        if (state.session.isAuthenticationInProgress()) return
+        val keyboardView = state.session.getCurrentKeyboardView() ?: return
+        if (!state.session.continueState.abandon()) return
+        drawAffordance(keyboardView, sessionId)
     }
 
     fun toggleBetweenBiometricAndKeyboard() {
         if (state.isClosed) return
         try {
-            val keyboardView = state.session.getCurrentKeyboardView() ?: return
-
             if (state.session.isAuthenticationInProgress()) {
                 state.session.cancelAuthentication()
             } else if (!PasswordAutoInput.isInProgress(state.session.currentSessionId())) {
-                val config = state.prefs.activeConfig() ?: return
-                state.session.bindConfig(config)
-                BiometricAuth.triggerBiometricAuth(keyboardView, config.encryptedPassword, state, state.session.currentSessionId())
+                if (ContinuePrompt.triggerNow()) return
+                state.prefs.activeConfig()?.let { state.session.bindConfig(it) }
+                openAuthentication()
             }
         } catch (e: Throwable) {
             ModuleLog.d(e) { "toggleBetweenBiometricAndKeyboard failed" }
@@ -82,6 +158,8 @@ class PaymentFlow(private val state: AppRuntime) {
     fun reset() {
         PasswordAutoInput.cancelPendingRunnables()
         InputMask.reset()
+        ContinuePrompt.dismiss()
+        pendingMarkUsed = null
         synchronized(attachLock) {
             attachListener?.let { l ->
                 val view = attachedViewRef?.get()
@@ -117,8 +195,8 @@ class PaymentFlow(private val state: AppRuntime) {
                     !PasswordAutoInput.isInProgress(sessionId)) {
                     val encoded = state.prefs.activePassword()
                     if (!encoded.isNullOrEmpty()) {
-                        ModuleLog.d { "onViewAttached: triggering auth, view=${kv.hashCode()}" }
-                        BiometricAuth.triggerBiometricAuth(kv, encoded, state, sessionId)
+                        ModuleLog.d { "onViewAttached: requesting confirmation, view=${kv.hashCode()}" }
+                        awaitContinue(kv, sessionId, null)
                     }
                 } else {
                     ModuleLog.d { "onViewAttached: biometric in progress, skipping, view=${kv.hashCode()}" }

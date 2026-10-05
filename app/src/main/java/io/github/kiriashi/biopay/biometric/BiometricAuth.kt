@@ -135,10 +135,12 @@ object BiometricAuth {
         else -> null
     }
 
-    private fun restoreKeyboard(state: AppRuntime, sessionId: Long, attemptId: Long) {
+    private fun restoreKeyboard(state: AppRuntime, sessionId: Long, attemptId: Long): Boolean {
         if (state.session.isCurrentSession(sessionId) && state.session.finishAuthentication(attemptId)) {
             state.session.restoreKeyboard(sessionId)
+            return true
         }
+        return false
     }
 
     private class BiometricAuthCallback(
@@ -308,10 +310,12 @@ object BiometricAuth {
                 ModuleLog.d { "payment input ready: app=${state.adapter.app}, attempt=$attemptId, elapsed=${SystemClock.uptimeMillis() - startedAt}ms" }
                 if (!PasswordAutoInput.autoInputPassword(keyboard, plaintext, state, sessionId, config, input)) {
                     state.session.restoreKeyboard(sessionId)
+                    state.flow.authenticationAbandoned(sessionId)
                 }
             } catch (error: Exception) {
                 ModuleLog.w(error) { "post-authentication input failed" }
                 state.session.restoreKeyboard(sessionId)
+                state.flow.authenticationAbandoned(sessionId)
             } finally {
                 plaintext.fill('\u0000')
             }
@@ -320,7 +324,7 @@ object BiometricAuth {
         private fun stop(reason: String) {
             ModuleLog.d { "payment authentication ended: app=${state.adapter.app}, attempt=$attemptId, reason=$reason" }
             dispose()
-            restoreKeyboard(state, sessionId, attemptId)
+            if (restoreKeyboard(state, sessionId, attemptId)) state.flow.authenticationAbandoned(sessionId)
         }
     }
 

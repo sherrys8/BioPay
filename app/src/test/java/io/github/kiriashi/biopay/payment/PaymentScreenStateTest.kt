@@ -41,4 +41,44 @@ class PaymentScreenStateTest {
         screen.clear()
         assertTrue(screen.shouldAttempt(keyboard, 9_000L))
     }
+
+    @Test
+    fun awaitingConfirmationCountsAsRequestedWithoutConsumingTheSheet() {
+        val screen = PaymentScreenState<Any>()
+        val keyboard = Any()
+
+        assertFalse(screen.requested)
+        assertFalse(screen.awaitingContinue)
+
+        screen.markAwaitingContinue(keyboard)
+        assertTrue(screen.requested)
+        assertTrue(screen.awaitingContinue)
+        assertFalse(screen.prompted)
+        assertSame(keyboard, screen.keyboard())
+
+        // A screen that only shows the confirmation must still end its session when it disappears.
+        assertFalse(screen.screenAbsentTooLong(false, false, false, 1_000L))
+        assertTrue(screen.screenAbsentTooLong(false, false, false, 3_600L))
+
+        screen.markPrompted(keyboard)
+        assertTrue(screen.prompted)
+        assertTrue(screen.requested)
+        assertFalse(screen.awaitingContinue)
+
+        screen.clear()
+        assertFalse(screen.requested)
+    }
+
+    @Test
+    fun usedSheetNeverFallsBackToWaitingForConfirmation() {
+        val screen = PaymentScreenState<Any>()
+
+        screen.markPrompted(Any())
+        assertFalse(screen.awaitingContinue)
+        assertTrue(screen.requested)
+
+        // A rebuilt keypad on a screen whose sheet was already used must bind without a new request.
+        screen.rememberKeyboard(Any())
+        assertFalse(screen.awaitingContinue)
+    }
 }

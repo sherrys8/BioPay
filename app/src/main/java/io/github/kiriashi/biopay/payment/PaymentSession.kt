@@ -25,6 +25,7 @@ class PaymentSession(private val onDestroy: () -> Unit = {}) {
     private val tasks = MainTasks()
     private val ime = PaymentIme()
     private val signalLock = Any()
+    internal val continueState = ContinueState()
 
     data class AuthenticationAttempt(val id: Long, val signal: CancellationSignal)
 
@@ -262,6 +263,7 @@ class PaymentSession(private val onDestroy: () -> Unit = {}) {
         tasks.clear()
         manualImeRestore = null
         ime.clear()
+        continueState.reset()
         keyboardMode = KeyboardMode.UNKNOWN
         inputHandoff = false
         if (clearBindings) {

@@ -8,6 +8,7 @@ package io.github.kiriashi.biopay.runtime
 import android.view.MotionEvent
 import android.view.View
 import io.github.kiriashi.biopay.core.log.ModuleLog
+import io.github.kiriashi.biopay.payment.ContinuePrompt
 import io.github.kiriashi.biopay.payment.InputMask
 import io.github.libxposed.api.XposedInterface
 
@@ -19,7 +20,9 @@ internal object InputTouchHook {
         try {
             val root = chain.thisObject as? View
             val event = chain.args[0] as? MotionEvent
-            if (!state.isClosed && root != null && event != null && InputMask.blocksTouch(root, event)) {
+            if (!state.isClosed && root != null && event != null &&
+                (ContinuePrompt.blocksTouch(root, event) || InputMask.blocksTouch(root, event))
+            ) {
                 return@Hooker true
             }
         } catch (error: Throwable) {

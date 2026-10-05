@@ -175,7 +175,7 @@ class VisualPaymentMonitor(private val state: AppRuntime, private val adapter: V
 
     private fun unwatch(root: ViewGroup, endSession: Boolean = true) {
         observers.remove(root)?.removeFrom(root)
-        if (screenState.keyboard()?.rootView === root && screenState.prompted) schedulePaymentExitCheck()
+        if (screenState.keyboard()?.rootView === root && screenState.requested) schedulePaymentExitCheck()
         if (endSession && !screenState.prompted && screenState.keyboard()?.rootView === root) {
             screenState.clear()
             state.session.endSession(state.session.currentSessionId())
@@ -190,7 +190,7 @@ class VisualPaymentMonitor(private val state: AppRuntime, private val adapter: V
 
     private fun schedulePaymentExitCheck() {
         tasks.cancel(paymentExitCheck)
-        if (screenState.prompted || state.session.isInPaymentMode()) {
+        if (screenState.requested || state.session.isInPaymentMode()) {
             tasks.post(paymentExitCheck, PAYMENT_EXIT_GRACE_MS)
         }
     }
@@ -233,13 +233,13 @@ class VisualPaymentMonitor(private val state: AppRuntime, private val adapter: V
             val password = state.prefs.activePassword() ?: return false
             val screen = adapter.observe(root, activity)
             if (screen == null) {
-                if (screenState.keyboard()?.rootView === root && screenState.prompted) schedulePaymentExitCheck()
+                if (screenState.keyboard()?.rootView === root && screenState.requested) schedulePaymentExitCheck()
                 return false
             }
             tasks.cancel(paymentExitCheck)
             state.session.setInputEditText(screen.passwordInput)
             state.session.setConfirmButton(screen.confirmButton)
-            if (screenState.prompted) {
+            if (screenState.requested) {
                 val current = state.session.getCurrentKeyboardView()
                 if (current?.rootView === screen.keyboard.rootView) {
                     state.session.updateKeyboardMode(screen.keyboardMode)
@@ -250,9 +250,16 @@ class VisualPaymentMonitor(private val state: AppRuntime, private val adapter: V
                         current.isShown != true)
                 ) {
                     if (state.flow.setupBiometricAuth(
-                            screen.keyboard, password, activity, startImmediately = false,
-                            keyboardMode = screen.keyboardMode
+                            screen.keyboard, password, activity,
+                            startImmediately = screenState.awaitingContinue,
+                            keyboardMode = screen.keyboardMode,
+                            onContinue = { screenState.markPrompted(screen.keyboard) }
                         )) screenState.rememberKeyboard(screen.keyboard)
+                } else if (screenState.awaitingContinue && current != null &&
+                    current.rootView === screen.keyboard.rootView
+                ) {
+                    // The session outlived the affordance; the layout pass must redraw it.
+                    state.flow.refreshContinuePrompt(current)
                 }
                 return true
             }
@@ -262,12 +269,15 @@ class VisualPaymentMonitor(private val state: AppRuntime, private val adapter: V
             ) return true
             val now = SystemClock.uptimeMillis()
             if (!screenState.shouldAttempt(screen.keyboard, now)) return true
-            ModuleLog.d { "${adapter.app.displayName}: payment password screen recognized; requesting biometric authentication" }
-            if (state.flow.setupBiometricAuth(screen.keyboard, password, activity, keyboardMode = screen.keyboardMode)) {
-                screenState.markPrompted(screen.keyboard)
-                ModuleLog.d { "${adapter.app.displayName}: biometric authentication request started" }
+            ModuleLog.d { "${adapter.app.displayName}: payment password screen recognized; waiting for confirmation" }
+            if (state.flow.setupBiometricAuth(
+                    screen.keyboard, password, activity, keyboardMode = screen.keyboardMode,
+                    onContinue = { screenState.markPrompted(screen.keyboard) }
+                )) {
+                screenState.markAwaitingContinue(screen.keyboard)
+                ModuleLog.d { "${adapter.app.displayName}: confirmation requested" }
             } else {
-                ModuleLog.d { "${adapter.app.displayName}: biometric authentication request was not started" }
+                ModuleLog.d { "${adapter.app.displayName}: confirmation could not be shown" }
             }
             true
         } catch (e: Throwable) {

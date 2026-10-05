@@ -8,20 +8,32 @@ package io.github.kiriashi.biopay.payment
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
-/** One visible payment screen may request authentication automatically once. */
+/** One visible payment screen asks for confirmation once, then opens the sheet on a tap. */
 internal class PaymentScreenState<Keyboard : Any> {
-    private enum class Phase { SEARCHING, PROMPT_USED }
+    private enum class Phase { SEARCHING, WAITING_CONTINUE, PROMPT_USED }
 
     private var phase = Phase.SEARCHING
     private var keyboardRef: WeakReference<Keyboard>? = null
     private var absentSince = 0L
     private val lastAttempt = WeakHashMap<Keyboard, Long>()
 
+    /** The sheet has already been opened for this screen; never ask twice automatically. */
     val prompted: Boolean get() = phase == Phase.PROMPT_USED
+
+    /** The screen was recognized, whether it waits for a tap or is already authenticating. */
+    val requested: Boolean get() = phase != Phase.SEARCHING
+
+    val awaitingContinue: Boolean get() = phase == Phase.WAITING_CONTINUE
+
     fun keyboard(): Keyboard? = keyboardRef?.get()
 
     fun rememberKeyboard(keyboard: Keyboard) {
         keyboardRef = WeakReference(keyboard)
+    }
+
+    fun markAwaitingContinue(keyboard: Keyboard) {
+        rememberKeyboard(keyboard)
+        phase = Phase.WAITING_CONTINUE
     }
 
     fun markPrompted(keyboard: Keyboard) {
@@ -44,7 +56,7 @@ internal class PaymentScreenState<Keyboard : Any> {
             absentSince = now
             return false
         }
-        return now - absentSince > 2_500L && (prompted || hasSession)
+        return now - absentSince > 2_500L && (requested || hasSession)
     }
 
     fun clear() {
