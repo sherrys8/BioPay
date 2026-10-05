@@ -28,6 +28,11 @@ internal class ContinueState {
         phase = Phase.MANUAL
     }
 
+    /** The key gesture asked for verification again, so this session is no longer manual-only. */
+    fun rearm() {
+        if (phase == Phase.MANUAL) phase = Phase.COVERED
+    }
+
     fun reset() {
         phase = Phase.IDLE
     }

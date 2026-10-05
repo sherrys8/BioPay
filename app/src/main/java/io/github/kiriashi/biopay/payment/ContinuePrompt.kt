@@ -42,7 +42,7 @@ internal object ContinuePrompt {
         }
         covers.forEach(Cover::attach)
         ModuleLog.d { "keypad cover shown: app=${state.adapter.app}, session=$sessionId, hosts=${covers.size}" }
-        return covers.isNotEmpty()
+        return covers.any { it.hasEntries && it.hasPaintedTarget() }
     }
 
     /** Mirrors a tap on 继续验证; used by the volume key shortcut. */
@@ -66,7 +66,7 @@ internal object ContinuePrompt {
         // Cover the keys, never the keyboard container: WeChat leaves that window visible while it
         // shows the payment-method picker, so a container-sized cover paints across an unrelated
         // page. No key on screen means nothing here is a keypad, and nothing gets covered.
-        val visibleKeys = keys.filter { it.isShown && it.getGlobalVisibleRect(Rect()) }
+        val visibleKeys = keys.filter(::isPainted)
         if (visibleKeys.isEmpty()) return regions
         val index = regions.indexOfFirst { it.first === window }
         if (index < 0) {
@@ -132,6 +132,8 @@ internal object ContinuePrompt {
             host.addOnAttachStateChangeListener(this)
             keyboard.addOnAttachStateChangeListener(this)
         }
+
+        fun hasPaintedTarget(): Boolean = targets.any { isPainted(it) }
 
         fun fireContinue(): Boolean = fire(CONTINUE_LABEL, onContinue)
 
@@ -266,4 +268,20 @@ internal object ContinuePrompt {
             const val MANUAL_LABEL = "输入密码"
         }
     }
+}
+
+/**
+ * WeChat keeps the keypad window attached and laid out when it slides the payment-method picker over
+ * it, fading the keys instead of hiding them, so visibility alone cannot tell the two pages apart. A
+ * key counts only when nothing up its ancestry has been faded or hidden.
+ */
+private fun isPainted(view: View): Boolean {
+    if (!view.isShown || view.windowVisibility != View.VISIBLE) return false
+    if (!view.getGlobalVisibleRect(Rect())) return false
+    var current: View? = view
+    while (current != null) {
+        if (current.alpha <= 0f) return false
+        current = current.parent as? View
+    }
+    return true
 }

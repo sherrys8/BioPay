@@ -25,6 +25,7 @@ class PaymentFlow(private val state: AppRuntime) {
     private val setupLock = Any()
     private val tasks = MainTasks()
     @Volatile private var pendingMarkUsed: (() -> Unit)? = null
+    private var coverTries = 0
 
     fun setupBiometricAuth(
         keyboardView: ViewGroup, encodedPassword: String,
@@ -75,19 +76,30 @@ class PaymentFlow(private val state: AppRuntime) {
         state.paymentWorker.submit(work = {
             if (state.isClosed) null else runCatching { PasswordCipher.warmUp() }.getOrNull()
         }, discard = { }) { }
-        return drawCover(keyboardView, sessionId)
+        if (drawCover(keyboardView, sessionId)) return true
+        // WeChat measures the keypad a frame or two after it announces it, and nothing else drives
+        // a redraw on that path, so the first request can legitimately find nothing to cover yet.
+        coverTries = 0
+        tasks.post(coverRetry, COVER_RETRY_MS)
+        return true
+    }
+
+    private val coverRetry = Runnable {
+        val keyboard = state.session.getCurrentKeyboardView() ?: return@Runnable
+        if (refreshContinuePrompt(keyboard)) return@Runnable
+        if (++coverTries < COVER_TRIES) tasks.post(coverRetry, COVER_RETRY_MS)
     }
 
     /**
      * Redraws the affordance when a layout pass finds the keypad alive but nothing on screen,
      * which happens after a payment Activity hides and shows its password sheet again.
      */
-    fun refreshContinuePrompt(keyboardView: ViewGroup) {
+    fun refreshContinuePrompt(keyboardView: ViewGroup): Boolean {
         val sessionId = state.session.currentSessionId()
-        if (state.isClosed || sessionId == 0L || state.session.continueState.manual) return
-        if (!state.session.isCurrentSession(sessionId)) return
-        if (state.session.isAuthenticationInProgress() || PasswordAutoInput.isInProgress(sessionId)) return
-        drawCover(keyboardView, sessionId)
+        if (state.isClosed || sessionId == 0L || state.session.continueState.manual) return false
+        if (!state.session.isCurrentSession(sessionId)) return false
+        if (state.session.isAuthenticationInProgress() || PasswordAutoInput.isInProgress(sessionId)) return false
+        return drawCover(keyboardView, sessionId)
     }
 
     private fun drawCover(keyboardView: ViewGroup, sessionId: Long): Boolean = ContinuePrompt.show(
@@ -120,6 +132,7 @@ class PaymentFlow(private val state: AppRuntime) {
     /** The user took over typing; the keypad and its input method go back to them. */
     private fun enterManualMode(sessionId: Long) {
         if (state.isClosed) return
+        tasks.cancel(coverRetry)
         if (state.session.isCurrentSession(sessionId)) {
             state.session.continueState.enterManual()
             ContinuePrompt.dismiss()
@@ -146,6 +159,9 @@ class PaymentFlow(private val state: AppRuntime) {
                 state.session.cancelAuthentication()
             } else if (!PasswordAutoInput.isInProgress(state.session.currentSessionId())) {
                 if (ContinuePrompt.triggerNow()) return
+                // The gesture is how a session that went manual comes back, and a later cancel must
+                // re-cover it; leaving the manual flag set would strand the user on the bare keypad.
+                state.session.continueState.rearm()
                 state.prefs.activeConfig()?.let { state.session.bindConfig(it) }
                 openAuthentication()
             }
@@ -158,6 +174,7 @@ class PaymentFlow(private val state: AppRuntime) {
         PasswordAutoInput.cancelPendingRunnables()
         InputMask.reset()
         ContinuePrompt.dismiss()
+        tasks.cancel(coverRetry)
         pendingMarkUsed = null
         synchronized(attachLock) {
             attachListener?.let { l ->
@@ -222,5 +239,10 @@ class PaymentFlow(private val state: AppRuntime) {
             keyboardView = null
             sessionId = 0L
         }
+    }
+
+    private companion object {
+        const val COVER_RETRY_MS = 120L
+        const val COVER_TRIES = 8
     }
 }
