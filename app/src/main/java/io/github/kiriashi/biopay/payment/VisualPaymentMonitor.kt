@@ -176,7 +176,7 @@ class VisualPaymentMonitor(private val state: AppRuntime, private val adapter: V
     private fun unwatch(root: ViewGroup, endSession: Boolean = true) {
         observers.remove(root)?.removeFrom(root)
         if (screenState.keyboard()?.rootView === root && screenState.requested) schedulePaymentExitCheck()
-        if (endSession && !screenState.prompted && screenState.keyboard()?.rootView === root) {
+        if (endSession && screenState.keyboard()?.rootView === root) {
             screenState.clear()
             state.session.endSession(state.session.currentSessionId())
         }
