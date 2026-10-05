@@ -58,32 +58,23 @@ internal object ContinuePrompt {
 
     private fun regions(state: AppRuntime, keyboard: ViewGroup): List<Pair<ViewGroup, List<View>>> {
         val session = state.session
-        val keys = state.adapter.digitKeys(keyboard)?.filterNotNull()
+        val keys = state.adapter.digitKeys(keyboard)?.filterNotNull().orEmpty()
         val regions = PaymentMasks.resolve(
             state.adapter.app, keyboard, session.getInputEditText(), session.getConfirmButton(), keys
         ).map { it.host to it.targets }.toMutableList()
         val window = keyboard.rootView as? ViewGroup ?: return regions
+        // Cover the keys, never the keyboard container: WeChat leaves that window visible while it
+        // shows the payment-method picker, so a container-sized cover paints across an unrelated
+        // page. No key on screen means nothing here is a keypad, and nothing gets covered.
+        val visibleKeys = keys.filter { it.isShown && it.getGlobalVisibleRect(Rect()) }
+        if (visibleKeys.isEmpty()) return regions
         val index = regions.indexOfFirst { it.first === window }
         if (index < 0) {
-            regions += window to listOf<View>(keyboard)
-        } else if (!keypadCovered(regions[index].second, keyboard)) {
-            // PaymentMasks resolves the area that shows the plaintext, which is not the area that
-            // can be tapped: a keypad that fails to resolve, or that resolves to the window itself
-            // and is then dropped, leaves the keys live under a cover over the hint row only.
-            regions[index] = window to (regions[index].second + keyboard)
+            regions += window to visibleKeys
+        } else {
+            regions[index] = window to (regions[index].second + visibleKeys)
         }
         return regions
-    }
-
-    private fun keypadCovered(targets: List<View>, keyboard: ViewGroup): Boolean {
-        val keypad = Rect()
-        if (!keyboard.getGlobalVisibleRect(keypad)) return false
-        val covered = Rect()
-        for (view in targets) {
-            val bounds = Rect()
-            if (view.getGlobalVisibleRect(bounds)) covered.union(bounds)
-        }
-        return covered.contains(keypad)
     }
 
     private class Cover(
