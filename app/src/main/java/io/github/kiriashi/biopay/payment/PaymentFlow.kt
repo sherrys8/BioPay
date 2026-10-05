@@ -84,7 +84,7 @@ class PaymentFlow(private val state: AppRuntime) {
         return true
     }
 
-    private val coverRetry = Runnable {
+    private val coverRetry: Runnable = Runnable {
         val keyboard = state.session.getCurrentKeyboardView() ?: return@Runnable
         if (refreshContinuePrompt(keyboard)) return@Runnable
         if (++coverTries < COVER_TRIES) tasks.post(coverRetry, COVER_RETRY_MS)
