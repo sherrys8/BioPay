@@ -65,7 +65,7 @@ class PaymentFlow(private val state: AppRuntime) {
         return awaitContinue(keyboardView, sessionId, onContinue)
     }
 
-    /** Draws the confirmation affordance instead of opening the authentication sheet directly. */
+    /** Covers the keypad and offers the two exits instead of opening the sheet directly. */
     private fun awaitContinue(
         keyboardView: ViewGroup, sessionId: Long, onContinue: (() -> Unit)?
     ): Boolean {
@@ -75,7 +75,7 @@ class PaymentFlow(private val state: AppRuntime) {
         state.paymentWorker.submit(work = {
             if (state.isClosed) null else runCatching { PasswordCipher.warmUp() }.getOrNull()
         }, discard = { }) { }
-        return drawAffordance(keyboardView, sessionId)
+        return drawCover(keyboardView, sessionId)
     }
 
     /**
@@ -87,12 +87,11 @@ class PaymentFlow(private val state: AppRuntime) {
         if (state.isClosed || sessionId == 0L || state.session.continueState.manual) return
         if (!state.session.isCurrentSession(sessionId)) return
         if (state.session.isAuthenticationInProgress() || PasswordAutoInput.isInProgress(sessionId)) return
-        drawAffordance(keyboardView, sessionId)
+        drawCover(keyboardView, sessionId)
     }
 
-    private fun drawAffordance(keyboardView: ViewGroup, sessionId: Long): Boolean = ContinuePrompt.show(
+    private fun drawCover(keyboardView: ViewGroup, sessionId: Long): Boolean = ContinuePrompt.show(
         state, keyboardView, sessionId,
-        abandoned = state.session.continueState.abandoned,
         onContinue = ::openAuthentication,
         onManualEntry = { enterManualMode(sessionId) }
     )
@@ -114,7 +113,7 @@ class PaymentFlow(private val state: AppRuntime) {
             markUsed?.invoke()
         } else {
             // The sheet never launched; put the exits back rather than leaving a dead tap.
-            drawAffordance(keyboardView, sessionId)
+            drawCover(keyboardView, sessionId)
         }
     }
 
@@ -129,15 +128,15 @@ class PaymentFlow(private val state: AppRuntime) {
     }
 
     /**
-     * The sheet closed without entering the password. Restore the exits so a key gesture is
-     * never the only way back.
+     * The sheet closed without entering the password. Cover the keypad again: both exits only
+     * exist on the cover, so leaving it down would strand the user with a key gesture.
      */
     fun authenticationAbandoned(sessionId: Long) {
         if (state.isClosed || !state.session.isCurrentSession(sessionId)) return
         if (state.session.isAuthenticationInProgress()) return
         val keyboardView = state.session.getCurrentKeyboardView() ?: return
-        if (!state.session.continueState.abandon()) return
-        drawAffordance(keyboardView, sessionId)
+        if (!state.session.continueState.request()) return
+        drawCover(keyboardView, sessionId)
     }
 
     fun toggleBetweenBiometricAndKeyboard() {

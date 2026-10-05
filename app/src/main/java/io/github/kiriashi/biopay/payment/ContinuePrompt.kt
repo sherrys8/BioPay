@@ -6,7 +6,6 @@
 package io.github.kiriashi.biopay.payment
 
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -17,74 +16,100 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import io.github.kiriashi.biopay.apps.shared.PaymentMasks
 import io.github.kiriashi.biopay.core.log.ModuleLog
-import io.github.kiriashi.biopay.core.util.dp
 import io.github.kiriashi.biopay.runtime.AppRuntime
+import io.github.kiriashi.biopay.settings.ui.Theme
 
 /**
- * Authentication waits for one explicit tap so the payment screen stays switchable.
- * The affordances live in the window overlay and never modify the host view hierarchy.
+ * The keypad stays covered until the user either verifies or asks to type the password, so the
+ * payment screen is readable but its keys are unreachable. Covers use the same regions as the
+ * input mask and are drawn in the window overlay; the host view hierarchy is never modified.
  */
 internal object ContinuePrompt {
-    private var active: Prompt? = null
+    private var covers: List<Cover> = emptyList()
 
     fun show(
-        state: AppRuntime, keyboard: ViewGroup, sessionId: Long, abandoned: Boolean,
+        state: AppRuntime, keyboard: ViewGroup, sessionId: Long,
         onContinue: () -> Unit, onManualEntry: () -> Unit
     ): Boolean {
-        // A callback replayed by an authentication attempt that was already finished must not
-        // clear the affordance a newer session just drew.
-        active?.takeIf { it.sessionId <= sessionId }?.close()
-        val host = keyboard.rootView as? ViewGroup ?: return false
-        val prompt = Prompt(state, host, keyboard, sessionId, abandoned, onContinue, onManualEntry) { closed ->
-            if (active === closed) active = null
+        // A callback replayed by an older attempt must not replace the current session's cover.
+        if (covers.maxOfOrNull { it.sessionId }?.let { it > sessionId } == true) return false
+        dismiss()
+        val root = keyboard.rootView
+        covers = regions(state, keyboard).map { (host, targets) ->
+            Cover(state, host, keyboard, sessionId, targets, host === root, onContinue, onManualEntry)
         }
-        active = prompt
-        prompt.attach()
-        ModuleLog.d { "continue prompt shown: app=${state.adapter.app}, session=$sessionId, abandoned=$abandoned" }
-        return true
+        covers.forEach(Cover::attach)
+        ModuleLog.d { "keypad cover shown: app=${state.adapter.app}, session=$sessionId, hosts=${covers.size}" }
+        return covers.isNotEmpty()
     }
 
-    /** Mirrors a tap on the primary affordance; used by the volume key shortcut. */
-    fun triggerNow(): Boolean = active?.fireContinue() == true
+    /** Mirrors a tap on 继续验证; used by the volume key shortcut. */
+    fun triggerNow(): Boolean = covers.firstOrNull { it.hasEntries }?.fireContinue() == true
 
     fun dismiss() {
-        active?.close()
-        active = null
+        covers.forEach(Cover::close)
+        covers = emptyList()
     }
 
-    fun blocksTouch(root: View, event: MotionEvent): Boolean = active?.touches(root, event) == true
+    fun blocksTouch(root: View, event: MotionEvent): Boolean =
+        covers.any { it.touches(root, event) }
 
-    private class Prompt(
+    private fun regions(state: AppRuntime, keyboard: ViewGroup): List<Pair<ViewGroup, List<View>>> {
+        val session = state.session
+        val keys = state.adapter.digitKeys(keyboard)?.filterNotNull()
+        val layouts = PaymentMasks.resolve(
+            state.adapter.app, keyboard, session.getInputEditText(), session.getConfirmButton(), keys
+        )
+        if (layouts.isNotEmpty()) return layouts.map { it.host to it.targets }
+        val host = keyboard.rootView as? ViewGroup ?: return emptyList()
+        return listOf(host to listOf<View>(keyboard))
+    }
+
+    private class Cover(
         private val state: AppRuntime,
         private val host: ViewGroup,
         private val keyboard: ViewGroup,
         val sessionId: Long,
-        private val abandoned: Boolean,
+        private val targets: List<View>,
+        val hasEntries: Boolean,
         private val onContinue: () -> Unit,
-        private val onManualEntry: () -> Unit,
-        private val onClose: (Prompt) -> Unit
+        private val onManualEntry: () -> Unit
     ) : Drawable(), ViewTreeObserver.OnPreDrawListener, View.OnAttachStateChangeListener {
 
-        private enum class Region { NONE, PRIMARY, SECONDARY }
-
-        private val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(31, 31, 31) }
-        private val primaryLabel = labelPaint(16f)
-        private val secondaryLabel = labelPaint(13f)
-        private val primary = RectF()
-        private val secondary = RectF()
-        private val drawnPrimary = RectF()
-        private val drawnSecondary = RectF()
-        private val keyboardRect = Rect()
+        private val colors = Theme.colors(host.context, state.adapter.app)
+        private val density = host.context.resources.displayMetrics.density
+        private val surface = fillPaint(colors.surface)
+        private val continuePaint = fillPaint(colors.primary)
+        private val manualPaint = fillPaint(colors.surfaceContainerHighest)
+        private val continueText = textPaint(16f, colors.onPrimary)
+        private val manualText = textPaint(14f, colors.onSurfaceVariant)
+        private val panel = RectF()
+        private val continueButton = RectF()
+        private val manualButton = RectF()
+        private val drawnPanel = RectF()
+        private val drawnContinue = RectF()
+        private val drawnManual = RectF()
+        private val bounds = Rect()
         private val location = IntArray(2)
         private val observer = host.viewTreeObserver
-        private val primaryRadius = host.context.dp(BUTTON_HEIGHT_DP / 2).toFloat()
-        private val secondaryRadius = host.context.dp(ENTRY_HEIGHT_DP / 2).toFloat()
+        private val continueHeight = 48f * density
+        private val continueRadius = continueHeight / 2f
+        private val continueGap = 14f * density
+        private val manualHeight = 36f * density
+        private val manualRadius = manualHeight / 2f
+        private val panelMargin = 24f * density
         private var closed = false
-        private var pressed = Region.NONE
+        private var gesture = false
 
-        private fun labelPaint(sizeSp: Float) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
+        private fun fillPaint(color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            this.color = color
+        }
+
+        private fun textPaint(sizeSp: Float, color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
             textAlign = Paint.Align.CENTER
             textSize = TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_SP, sizeSp, host.resources.displayMetrics
@@ -98,11 +123,12 @@ internal object ContinuePrompt {
             keyboard.addOnAttachStateChangeListener(this)
         }
 
-        fun fireContinue(): Boolean = fire(onContinue)
+        fun fireContinue(): Boolean = fire(CONTINUE_LABEL, onContinue)
 
-        private fun fire(action: () -> Unit): Boolean {
+        private fun fire(label: String, action: () -> Unit): Boolean {
             if (closed || !isCurrent()) return false
             close()
+            ModuleLog.d { "keypad cover dismissed: $label, session=$sessionId" }
             action()
             return true
         }
@@ -110,38 +136,38 @@ internal object ContinuePrompt {
         fun close() {
             if (closed) return
             closed = true
-            pressed = Region.NONE
+            gesture = false
             if (observer.isAlive) observer.removeOnPreDrawListener(this)
             host.overlay.remove(this)
             host.removeOnAttachStateChangeListener(this)
             keyboard.removeOnAttachStateChangeListener(this)
-            primary.setEmpty()
-            secondary.setEmpty()
-            onClose(this)
+            panel.setEmpty()
         }
 
+        /** The whole cover consumes its own gesture so no hidden key can receive a touch. */
         fun touches(root: View, event: MotionEvent): Boolean {
             if (closed || root !== host.rootView || !isCurrent()) return false
+            if (panel.isEmpty) return false
             host.getLocationOnScreen(location)
+            val x = event.rawX - location[0]
+            val y = event.rawY - location[1]
             val action = event.actionMasked
-            val inside = regionAt(event.rawX - location[0], event.rawY - location[1])
-            if (action == MotionEvent.ACTION_DOWN) pressed = inside
-            val consume = pressed != Region.NONE
+            if (action == MotionEvent.ACTION_DOWN) gesture = panel.contains(x, y)
+            val consume = gesture
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                val started = pressed
-                pressed = Region.NONE
-                if (action == MotionEvent.ACTION_UP && started == inside && inside != Region.NONE) {
-                    fire(if (inside == Region.SECONDARY) onManualEntry else onContinue)
-                }
+                val wasGesturing = gesture
+                gesture = false
+                if (wasGesturing && action == MotionEvent.ACTION_UP) tapAt(x, y)
             }
             return consume
         }
 
-        /** Only the two affordances are consumed; every other touch reaches the host app. */
-        private fun regionAt(x: Float, y: Float): Region = when {
-            abandoned && secondary.contains(x, y) -> Region.SECONDARY
-            primary.contains(x, y) -> Region.PRIMARY
-            else -> Region.NONE
+        private fun tapAt(x: Float, y: Float) {
+            if (!hasEntries) return
+            when {
+                continueButton.contains(x, y) -> fire(CONTINUE_LABEL, onContinue)
+                manualButton.contains(x, y) -> fire(MANUAL_LABEL, onManualEntry)
+            }
         }
 
         override fun onPreDraw(): Boolean {
@@ -151,9 +177,10 @@ internal object ContinuePrompt {
                 return true
             }
             updateBounds()
-            if (drawnPrimary != primary || drawnSecondary != secondary) {
-                drawnPrimary.set(primary)
-                drawnSecondary.set(secondary)
+            if (drawnPanel != panel || drawnContinue != continueButton || drawnManual != manualButton) {
+                drawnPanel.set(panel)
+                drawnContinue.set(continueButton)
+                drawnManual.set(manualButton)
                 invalidateSelf()
             }
             return true
@@ -165,48 +192,43 @@ internal object ContinuePrompt {
 
         private fun updateBounds() {
             setBounds(0, 0, host.width, host.height)
-            primary.setEmpty()
-            secondary.setEmpty()
             host.getLocationOnScreen(location)
-            val margin = host.context.dp(MARGIN_DP).toFloat()
-            val height = host.context.dp(BUTTON_HEIGHT_DP).toFloat()
-            val width = host.width - margin * 2f
-            if (width <= 0f || host.height <= 0) return
-            val keypadTop = if (keyboard.getGlobalVisibleRect(keyboardRect)) {
-                keyboardRect.top - location[1]
-            } else {
-                host.height
+            panel.setEmpty()
+            for (view in targets) {
+                if (!view.isAttachedToWindow || !view.getGlobalVisibleRect(bounds)) continue
+                panel.union((bounds.left - location[0]).toFloat(), (bounds.top - location[1]).toFloat(),
+                    (bounds.right - location[0]).toFloat(), (bounds.bottom - location[1]).toFloat())
             }
-            val aboveKeypad = keypadTop - host.context.dp(GAP_DP) - height
-            val top = if (aboveKeypad >= margin) {
-                aboveKeypad
-            } else {
-                // Sheets whose keypad is the whole window leave no band above it.
-                (keypadTop - height).coerceAtLeast(margin) / 2f
-            }
-            primary.set(margin, top, margin + width, top + height)
-            if (!abandoned) return
-            val entryHeight = host.context.dp(ENTRY_HEIGHT_DP).toFloat()
-            val entryTop = host.context.dp(ENTRY_TOP_DP).toFloat()
-            val right = host.width - margin
-            val left = (right - secondaryLabel.measureText(MANUAL_LABEL) -
-                host.context.dp(ENTRY_PADDING_X_DP) * 2f).coerceAtLeast(margin)
-            secondary.set(left, entryTop, right, entryTop + entryHeight)
+            continueButton.setEmpty()
+            manualButton.setEmpty()
+            if (!hasEntries || panel.height() < continueHeight + manualHeight + continueGap + panelMargin) return
+            val width = (panel.width() - panelMargin * 2f).coerceAtMost(320f * density)
+            if (width <= 0f) return
+            val left = panel.centerX() - width / 2f
+            val top = panel.centerY() -
+                (continueHeight + continueGap + manualHeight) / 2f
+            continueButton.set(left, top, left + width, top + continueHeight)
+            val manualWidth = (manualText.measureText(MANUAL_LABEL) + 32f * density).coerceAtMost(width)
+            manualButton.set(panel.centerX() - manualWidth / 2f, top + continueHeight + continueGap,
+                panel.centerX() + manualWidth / 2f, top + continueHeight + continueGap + manualHeight)
         }
 
         override fun draw(canvas: Canvas) {
-            if (!primary.isEmpty) drawButton(canvas, primary, CONTINUE_LABEL, primaryLabel, primaryRadius)
-            if (abandoned && !secondary.isEmpty) {
-                drawButton(canvas, secondary, MANUAL_LABEL, secondaryLabel, secondaryRadius)
-            }
+            if (panel.isEmpty) return
+            canvas.drawRect(panel, surface)
+            if (!hasEntries) return
+            if (!continueButton.isEmpty) drawPill(canvas, continueButton, CONTINUE_LABEL, continuePaint,
+                continueText, continueRadius)
+            if (!manualButton.isEmpty) drawPill(canvas, manualButton, MANUAL_LABEL, manualPaint,
+                manualText, manualRadius)
         }
 
-        private fun drawButton(
-            canvas: Canvas, box: RectF, text: String, label: Paint, radius: Float
+        private fun drawPill(
+            canvas: Canvas, box: RectF, label: String, background: Paint, text: Paint, radius: Float
         ) {
             canvas.drawRoundRect(box, radius, radius, background)
-            val centerY = (box.top + box.bottom) / 2f
-            canvas.drawText(text, box.centerX(), centerY - (label.ascent() + label.descent()) / 2f, label)
+            canvas.drawText(label, box.centerX(),
+                (box.top + box.bottom) / 2f - (text.ascent() + text.descent()) / 2f, text)
         }
 
         override fun onViewAttachedToWindow(view: View) = Unit
@@ -223,12 +245,6 @@ internal object ContinuePrompt {
         private companion object {
             const val CONTINUE_LABEL = "继续验证"
             const val MANUAL_LABEL = "输入密码"
-            const val MARGIN_DP = 24
-            const val BUTTON_HEIGHT_DP = 44
-            const val GAP_DP = 12
-            const val ENTRY_TOP_DP = 10
-            const val ENTRY_HEIGHT_DP = 32
-            const val ENTRY_PADDING_X_DP = 14
         }
     }
 }

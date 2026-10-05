@@ -6,31 +6,21 @@
 package io.github.kiriashi.biopay.payment
 
 /**
- * Which confirmation affordances a payment session currently offers.
+ * Whether a payment session still shows the keypad cover.
  * Pure JVM: drawing and hit testing live in ContinuePrompt.
  */
 internal class ContinueState {
-    private enum class Phase { IDLE, WAITING, ABANDONED, MANUAL }
+    private enum class Phase { IDLE, COVERED, MANUAL }
 
     private var phase = Phase.IDLE
 
-    /** The keypad was handed back to the user; nothing may be drawn again for this session. */
+    /** The user asked to type the password; the cover must never come back for this session. */
     val manual: Boolean get() = phase == Phase.MANUAL
 
-    /** Both exits belong on screen: retry the verification or type the password. */
-    val abandoned: Boolean get() = phase == Phase.ABANDONED
-
-    /** Returns whether the affordance must be drawn; false means bind without drawing. */
+    /** Returns whether the cover must be drawn; false means bind without covering. */
     fun request(): Boolean {
         if (phase == Phase.MANUAL) return false
-        if (phase == Phase.IDLE) phase = Phase.WAITING
-        return true
-    }
-
-    /** The sheet closed without entering the password. */
-    fun abandon(): Boolean {
-        if (phase == Phase.IDLE) return false
-        phase = Phase.ABANDONED
+        if (phase == Phase.IDLE) phase = Phase.COVERED
         return true
     }
 
