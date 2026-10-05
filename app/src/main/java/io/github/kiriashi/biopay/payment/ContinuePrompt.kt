@@ -61,7 +61,6 @@ internal object ContinuePrompt {
     private fun regions(state: AppRuntime, keyboard: ViewGroup): List<Pair<ViewGroup, List<View>>> {
         val session = state.session
         val window = keyboard.rootView as? ViewGroup ?: return emptyList()
-        if (isPaymentMethodPicker(window)) return emptyList()
         // Search the whole window too: WeChat keeps several MyKeyboardWindow instances and the one
         // that announced itself is often the unmeasured one.
         val keys = (state.adapter.digitKeys(keyboard).orEmpty() + state.adapter.digitKeys(window).orEmpty())
@@ -129,6 +128,7 @@ internal object ContinuePrompt {
         private var closed = false
         private var gesture = false
         private var pickerCheckedAt = 0L
+        private var pickerActive = false
 
         private fun fillPaint(color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
@@ -208,10 +208,7 @@ internal object ContinuePrompt {
             val now = SystemClock.uptimeMillis()
             if (now - pickerCheckedAt >= PICKER_CHECK_MS) {
                 pickerCheckedAt = now
-                if (isPaymentMethodPicker(host)) {
-                    close()
-                    return true
-                }
+                pickerActive = isPaymentMethodPicker(host)
             }
             updateBounds()
             if (drawnPanel != panel || drawnContinue != continueButton || drawnManual != manualButton) {
@@ -238,6 +235,12 @@ internal object ContinuePrompt {
             }
             continueButton.setEmpty()
             manualButton.setEmpty()
+            if (pickerActive) {
+                // Paused, not destroyed: WeChat shows no new keyboard event when the picker closes,
+                // so an empty panel here is what lets the cover come back on its own.
+                panel.setEmpty()
+                return
+            }
             if (hasEntries && !panel.isEmpty) {
                 // FingerprintPay anchors its cover to the bottom of the window at full width instead
                 // of trusting measured key bounds, so a keypad that has not finished laying out still
@@ -311,8 +314,8 @@ private val PICKER_LABELS = arrayOf(
 
 /**
  * WeChat swaps the payment-method picker into the same window that carries the keypad, so an overlay
- * cover would otherwise sit on top of that list. FingerprintPay recognises the page by its title and
- * drops the cover; the same strings are used here.
+ * cover would otherwise sit on top of that list. FingerprintPay recognises the page by its title; the
+ * cover pauses while it matches and resumes on its own once the picker is gone.
  */
 private fun isPaymentMethodPicker(window: ViewGroup): Boolean =
     PaymentViewTree(window).hasText(*PICKER_LABELS)
