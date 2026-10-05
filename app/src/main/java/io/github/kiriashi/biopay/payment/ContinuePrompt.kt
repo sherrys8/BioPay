@@ -5,6 +5,7 @@
  */
 package io.github.kiriashi.biopay.payment
 
+import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -12,12 +13,14 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.SystemClock
 import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import io.github.kiriashi.biopay.apps.PaymentApp
 import io.github.kiriashi.biopay.apps.shared.PaymentMasks
 import io.github.kiriashi.biopay.apps.shared.PaymentViewTree
 import io.github.kiriashi.biopay.core.log.ModuleLog
@@ -108,9 +111,12 @@ internal object ContinuePrompt {
         private val density = host.context.resources.displayMetrics.density
         // Deliberately not Theme.surface: the cover must read as an opaque sheet over the keypad.
         private val surface = fillPaint(Color.WHITE)
-        private val continuePaint = fillPaint(colors.primary)
+        // WeChat only: Material You maps M3's primary/onPrimary onto the platform's wallpaper tones.
+        private val wallpaper = if (state.adapter.app == PaymentApp.WECHAT)
+            wallpaperPrimary(host.context, Theme.isDark(host.context)) else null
+        private val continuePaint = fillPaint(wallpaper?.first ?: colors.primary)
         private val manualPaint = fillPaint(colors.surfaceContainerHighest)
-        private val continueText = textPaint(16f, colors.onPrimary)
+        private val continueText = textPaint(16f, wallpaper?.second ?: colors.onPrimary)
         private val manualText = textPaint(14f, colors.onSurfaceVariant)
         private val panel = RectF()
         private val continueButton = RectF()
@@ -327,6 +333,22 @@ private fun resourceNameOf(view: View): String? = try {
     view.resources.getResourceEntryName(view.id)
 } catch (_: Throwable) {
     null
+}
+
+/**
+ * Material You (2021) derives the M3 primary roles from the wallpaper palette: tone 500 under white
+ * text in the light scheme, tone 200 under tone 800 text in the dark scheme. Null below API 31,
+ * where the platform exposes no wallpaper tones to read.
+ */
+private fun wallpaperPrimary(context: Context, dark: Boolean): Pair<Int, Int>? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+    val background = if (dark) android.R.color.system_accent1_200 else android.R.color.system_accent1_500
+    val foreground = if (dark) android.R.color.system_accent1_800 else android.R.color.system_accent1_0
+    return try {
+        Pair(context.getColor(background), context.getColor(foreground))
+    } catch (_: Throwable) {
+        null
+    }
 }
 
 /**
